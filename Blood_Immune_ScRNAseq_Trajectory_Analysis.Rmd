@@ -1,0 +1,419 @@
+---
+title: "Blood_Immune_ScRNAseq_Trajectory_Analysis"
+output: rmarkdown::github_document
+---
+
+## Objectives
+
+### Single-cell Transcriptomic Landscape of Human Blood Cells using data from the journal article "Single-cell transcriptomic landscape of human blood cells" 
+
+### Xie et al., 2021, Natl Sci Rev 8:nwaa180. 
+
+### The authors profiled the transcriptomes of 7,643 human blood cells covering 32 immunophenotypic cell types across 21 healthy donors. They have constructed the single-cell transcriptional atlas of blood cells on the basis of protein-coding genes and long noncoding RNAs (lncRNAs) respectively, and showed a high consistence between them. Notably, lncRNAs and novel transcription factors regulating hematopoietic cell differentiation were identified.
+
+### Single cell RNAseq for BM/PB-derived 32 blood cells
+
+### GEO with the following accession code: GSE137864 and GSE149938
+
+## Data
+
+### Raw data is accessible from http://scrna.sklehabc.com/
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Setup
+
+```{r}
+pacman::p_load(tidyverse, 
+               monocle3,Seurat, 
+               SeuratWrappers,
+               ggplot2)
+
+rm(list=ls())
+```
+
+## Read in data
+
+```{r}
+# read in data
+markers <- read.delim('./data/ABC_Marker.txt', header = T) # gene metadata
+metadata <- read.delim('./data/ABC_Meta.txt', header = T) # cell metadata
+expr <- read.delim('./data/ABC_umi_matrix_7551_cells.csv', header = T, sep = ',') # expression matrix
+```
+
+## Understanding the data
+
+```{r, results='hide'}
+#Inspect that data
+dim(expr)
+
+#taking a peek at different parts of the gene expression matrix
+expr[1:5,1:5]
+expr[100:105,100:105]
+
+#to show that the data is not blank
+max(expr)
+min(expr)
+
+```
+
+```{r, results='hide'}
+#Inspect that data
+dim(metadata)
+
+#taking a peek at different parts of the gene expression matrix
+metadata
+
+```
+
+```{r, results='hide'}
+#Inspect that data
+dim(markers)
+
+#taking a peek at different parts of the gene expression matrix
+markers
+
+```
+
+## Create Seurat Object
+
+```{r, results='hide'}
+expr.t <- t(expr)
+seu.obj <- CreateSeuratObject(counts = expr.t)
+
+```
+
+## Merge data
+
+```{r, results='hide'}
+
+seu.obj@meta.data <- merge(seu.obj@meta.data, metadata, by.x = 'row.names', by.y = 'cell_id')
+
+seu.obj@meta.data 
+```
+
+## Convert column data to row
+
+```{r, results='hide'}
+seu.obj@meta.data <- seu.obj@meta.data %>% 
+  column_to_rownames(var = 'Row.names')
+
+seu.obj@meta.data 
+```
+
+## Calculate % mitochondria (dying cells)
+
+```{r}
+seu.obj@meta.data[["mitopercent"]] <- PercentageFeatureSet(seu.obj, pattern = "^MT-")
+seu.obj.filtered <- subset(seu.obj, subset = nCount_RNA > 800 &
+                    nFeature_RNA > 500 &
+                    mitopercent < 10)
+```
+
+## subset the seurat object - T cells
+
+```{r}
+unique(seu.obj.filtered@meta.data$population)
+
+Idents(seu.obj.filtered) <- seu.obj.filtered$population
+t.seu <- subset(seu.obj.filtered, idents = "t")
+t.seu
+unique(t.seu@meta.data$redefined_cluster)
+
+```
+
+## Data Preprocessing using Seurat Object
+
+```{r}
+t.seu <- NormalizeData(t.seu)
+t.seu <- FindVariableFeatures(t.seu)
+t.seu <- ScaleData(t.seu)
+t.seu <- RunPCA(t.seu)
+t.seu <- FindNeighbors(t.seu, dims = 1:30)
+t.seu <- FindClusters(t.seu, resolution = 0.9)
+t.seu <- RunUMAP(t.seu, dims = 1:30, n.neighbors = 50)
+
+a1 <- DimPlot(t.seu, reduction = 'umap', group.by = 'redefined_cluster', label = T)
+a2 <- DimPlot(t.seu, reduction = 'umap', group.by = 'seurat_clusters', label = T)
+a1|a2
+
+```
+
+## Monocle3 requires cell_data_set object
+### convert seurat object to cell_data_set object for monocle3
+
+```{r, results='hide'}
+cds <- as.cell_data_set(t.seu)
+cds
+
+# to get cell metadata
+colData(cds)
+# to gene metdata
+fData(cds)
+rownames(fData(cds))[1:10]
+
+# since it misses the gene_short_name column, let's add it
+fData(cds)$gene_short_name <- rownames(fData(cds))
+
+# to get counts
+counts(cds)
+```
+
+## Cluster cells (using clustering info from seurat's UMAP)
+
+```{r}
+# assign paritions
+reacreate.partition <- c(rep(1,length(cds@colData@rownames)))
+names(reacreate.partition) <- cds@colData@rownames
+reacreate.partition <- as.factor(reacreate.partition)
+
+
+cds@clusters$UMAP$partitions <- reacreate.partition
+
+# Assign the cluster info 
+
+list_cluster <- t.seu@active.ident
+cds@clusters$UMAP$clusters <- list_cluster
+
+
+# Assign UMAP coordinate - cell embeddings
+
+cds@int_colData@listData$reducedDims$UMAP <- t.seu@reductions$umap@cell.embeddings
+
+
+
+# plot
+
+cluster.before.trajectory <- plot_cells(cds,
+           color_cells_by = 'cluster',
+           label_groups_by_cluster = FALSE,
+           group_label_size = 5) +
+  theme(legend.position = "right")
+
+cluster.names <- plot_cells(cds,
+           color_cells_by = "redefined_cluster",
+           label_groups_by_cluster = FALSE,
+           group_label_size = 5) +
+  scale_color_manual(values = c('red', 'blue', 'green', 'maroon', 'yellow', 'grey', 'cyan')) +
+  theme(legend.position = "right")
+
+cluster.before.trajectory | cluster.names
+
+```
+
+## Learn trajectory graph
+
+```{r}
+cds <- learn_graph(cds, use_partition = FALSE)
+
+plot_cells(cds,
+           color_cells_by = 'redefined_cluster',
+           label_groups_by_cluster = FALSE,
+           label_branch_points = FALSE,
+           label_roots = FALSE,
+           label_leaves = FALSE,
+           group_label_size = 5)
+```
+
+
+## Order the cells in pseudotime
+
+```{r}
+cds <- order_cells(cds, reduction_method = 'UMAP', root_cells = colnames(cds[,clusters(cds) == 2]))
+
+plot_cells(cds,
+           color_cells_by = 'pseudotime',
+           label_groups_by_cluster = FALSE,
+           label_branch_points = FALSE,
+           label_roots = FALSE,
+           label_leaves = FALSE)
+```
+```{r, results='hide'}
+# cells ordered by monocle3 pseudotime
+
+pseudotime(cds)
+
+```
+
+
+```{r}
+cds$monocle3_pseudotime <- pseudotime(cds)
+data.pseudo <- as.data.frame(colData(cds))
+
+ggplot(data.pseudo, aes(monocle3_pseudotime, reorder(redefined_cluster, monocle3_pseudotime, median), fill = redefined_cluster)) +
+  geom_boxplot()
+```
+
+## Finding genes that change as a function of pseudotime
+
+```{r}
+deg_tcells <- graph_test(cds, neighbor_graph = 'principal_graph', cores = 4)
+
+deg_tcells %>% 
+  arrange(q_value) %>% 
+  filter(status == 'OK') %>% 
+  head()
+
+FeaturePlot(t.seu, features = c('SELL', 'GNLY', 'GZMH'))
+
+
+# visualizing pseudotime in seurat
+
+t.seu$pseudotime <- pseudotime(cds)
+Idents(t.seu) <- t.seu$redefined_cluster
+FeaturePlot(t.seu, features = "pseudotime", label = T)
+```
+
+## Subset the Seurat Object - B cells
+
+```{r}
+b.seu <- subset(seu.obj.filtered, idents = "b")
+b.seu
+unique(b.seu@meta.data$redefined_cluster)
+
+```
+
+## Data Preprocessing using Seurat Object
+
+```{r}
+b.seu <- NormalizeData(b.seu)
+b.seu <- FindVariableFeatures(b.seu)
+b.seu <- ScaleData(b.seu)
+b.seu <- RunPCA(b.seu)
+b.seu <- FindNeighbors(b.seu, dims = 1:30)
+b.seu <- FindClusters(b.seu, resolution = 0.9)
+b.seu <- RunUMAP(b.seu, dims = 1:30, n.neighbors = 50)
+
+a1 <- DimPlot(b.seu, reduction = 'umap', group.by = 'redefined_cluster', label = T)
+a2 <- DimPlot(b.seu, reduction = 'umap', group.by = 'seurat_clusters', label = T)
+a1|a2
+
+```
+
+## Monocle3 requires cell_data_set object
+### Convert Seurat Object to cell_data_set object for Monocle3
+
+```{r, results='hide'}
+cds <- as.cell_data_set(b.seu)
+cds
+
+# to get cell metadata
+colData(cds)
+# to gene metdata
+fData(cds)
+rownames(fData(cds))[1:10]
+
+# since it misses the gene_short_name column, let's add it
+fData(cds)$gene_short_name <- rownames(fData(cds))
+
+# to get counts
+counts(cds)
+```
+
+## Cluster cells (using clustering info from seurat's UMAP)
+
+```{r}
+# assign paritions
+reacreate.partition <- c(rep(1,length(cds@colData@rownames)))
+names(reacreate.partition) <- cds@colData@rownames
+reacreate.partition <- as.factor(reacreate.partition)
+
+
+cds@clusters$UMAP$partitions <- reacreate.partition
+
+# Assign the cluster info 
+
+list_cluster <- b.seu@active.ident
+cds@clusters$UMAP$clusters <- list_cluster
+
+
+# Assign UMAP coordinate - cell embeddings
+
+cds@int_colData@listData$reducedDims$UMAP <- b.seu@reductions$umap@cell.embeddings
+
+
+
+# plot
+
+cluster.before.trajectory <- plot_cells(cds,
+           color_cells_by = 'cluster',
+           label_groups_by_cluster = FALSE,
+           group_label_size = 5) +
+  theme(legend.position = "right")
+
+cluster.names <- plot_cells(cds,
+           color_cells_by = "redefined_cluster",
+           label_groups_by_cluster = FALSE,
+           group_label_size = 5) +
+  scale_color_manual(values = c('red', 'blue', 'green', 'maroon', 'yellow', 'grey', 'cyan')) +
+  theme(legend.position = "right")
+
+cluster.before.trajectory | cluster.names
+
+```
+
+## Learn trajectory graph
+
+```{r}
+cds <- learn_graph(cds, use_partition = FALSE)
+
+plot_cells(cds,
+           color_cells_by = 'redefined_cluster',
+           label_groups_by_cluster = FALSE,
+           label_branch_points = FALSE,
+           label_roots = FALSE,
+           label_leaves = FALSE,
+           group_label_size = 5)
+```
+
+## Order the cells in pseudotime
+
+```{r}
+cds <- order_cells(cds, reduction_method = 'UMAP', root_cells = colnames(cds[,clusters(cds) == 5]))
+
+plot_cells(cds,
+           color_cells_by = 'pseudotime',
+           label_groups_by_cluster = FALSE,
+           label_branch_points = FALSE,
+           label_roots = FALSE,
+           label_leaves = FALSE)
+```
+
+```{r, results='hide'}
+# cells ordered by monocle3 pseudotime
+
+pseudotime(cds)
+
+```
+
+
+```{r}
+cds$monocle3_pseudotime <- pseudotime(cds)
+data.pseudo <- as.data.frame(colData(cds))
+
+ggplot(data.pseudo, aes(monocle3_pseudotime, reorder(redefined_cluster, monocle3_pseudotime, median), fill = redefined_cluster)) +
+  geom_boxplot()
+```
+
+
+## Finding genes that change as a function of pseudotime
+
+```{r}
+deg_bcells <- graph_test(cds, neighbor_graph = 'principal_graph', cores = 4)
+
+deg_bcells %>% 
+  arrange(q_value) %>% 
+  filter(status == 'OK') %>% 
+  head()
+
+FeaturePlot(b.seu, features = c( 'CENPF', 'STMN1', 'CD52', 'FKBP11'))
+
+
+# visualizing pseudotime in seurat
+
+b.seu$pseudotime <- pseudotime(cds)
+Idents(b.seu) <- b.seu$redefined_cluster
+FeaturePlot(b.seu, features = "pseudotime", label = T)
+```
