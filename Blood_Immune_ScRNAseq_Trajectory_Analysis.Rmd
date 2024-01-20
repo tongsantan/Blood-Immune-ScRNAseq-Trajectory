@@ -15,9 +15,11 @@ output: rmarkdown::github_document
 
 ### GEO with the following accession code: GSE137864 and GSE149938
 
-## Data
+## Source Data and Acknowledgements
 
 ### Raw data is accessible from http://scrna.sklehabc.com/
+
+### Modified script from Bioinformagician: Single-cell Trajectory analysis using Monocle3 and Seurat | Step-by-step tutorial
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -230,13 +232,13 @@ plot_cells(cds,
            label_roots = FALSE,
            label_leaves = FALSE)
 ```
+
 ```{r, results='hide'}
 # cells ordered by monocle3 pseudotime
 
 pseudotime(cds)
 
 ```
-
 
 ```{r}
 cds$monocle3_pseudotime <- pseudotime(cds)

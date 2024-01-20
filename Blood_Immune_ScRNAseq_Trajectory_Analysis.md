@@ -13,9 +13,11 @@ Blood_Immune_ScRNAseq_Trajectory_Analysis
 
 ### GEO with the following accession code: GSE137864 and GSE149938
 
-## Data
+## Source Data and Acknowledgements
 
 ### Raw data is accessible from <http://scrna.sklehabc.com/>
+
+### Modified script from Bioinformagician: Single-cell Trajectory analysis using Monocle3 and Seurat | Step-by-step tutorial
 
 ## Setup
 
